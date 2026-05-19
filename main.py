@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 class StudyAgentApp:
     def __init__(self):
         load_dotenv()
+        
+        # Initialize SQLite Database
+        try:
+            from study_agent.core.db import init_db
+            init_db()
+            logger.info("App: Database initialized successfully.")
+        except Exception as e:
+            logger.error(f"App: Failed to initialize SQLite Database: {e}")
+
         self.config_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "config.yaml"))
         self.config = self._load_config()
 
@@ -261,7 +270,29 @@ class StudyAgentApp:
             self.overlay.update_status(f"💾 Exporting summaries + cards...", "#30D158")
             written_paths = self.exporter.export(study_material)
 
-            # 4. Success Notify
+            # 4. Save to Database
+            try:
+                from study_agent.core.db import SessionLocal, save_processed_document, save_study_material
+                db = SessionLocal()
+                ext = os.path.splitext(filename)[1].lower().replace(".", "")
+                save_processed_document(db, file_path, ext or "voice", extracted_text, course_name)
+                
+                cards = [card.model_dump() for card in study_material.flashcards]
+                questions = [q.model_dump() for q in study_material.exam_questions]
+                
+                full_md = study_material.summary_markdown
+                if study_material.mnemonics:
+                    full_md += "\n\n## 💡 Mnemonics (Eselsbrücken)\n"
+                    for m in study_material.mnemonics:
+                        full_md += f"- **{m.concept}**: {m.memory_hook}\n"
+                        
+                save_study_material(db, course_name, study_material.topic, full_md, cards, questions)
+                db.close()
+                logger.info("App: Successfully saved processed data to SQLite database.")
+            except Exception as dbe:
+                logger.error(f"App: Failed to save to database: {dbe}")
+
+            # 5. Success Notify
             success_msg = f"Generated summary + Anki cards for '{course_name}'!"
             logger.info(success_msg)
             self.overlay.update_status(f"✅ Generated study deck: {course_name}!", "#30D158")
