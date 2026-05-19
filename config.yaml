@@ -1,0 +1,54 @@
+# Study Agent System Configuration
+
+# Directory to watch for incoming lecture files, handwriting screenshots, audio files, etc.
+watch_dir: "./watch_folder"
+
+# Root directory where generated learning materials will be stored
+output_dir: "./output"
+
+# API model preferences
+models:
+  llm_provider: "gemini"             # "gemini" or "claude" or "openai"
+  whisper: "whisper-1"
+  claude: "claude-3-5-sonnet-20241022"
+  gemini: "gemini-1.5-pro"
+  whisper_mode: "local"              # "local" for offline free transcription, "api" for OpenAI API key
+  whisper_local_model: "base"         # "tiny", "base", "small", "medium"
+
+# Global hotkey triggers
+hotkeys:
+  screenshot: "ctrl+shift+x"
+  voice_capture: "ctrl+shift+r"
+
+# Settings for quick voice note recording
+audio:
+  samplerate: 16000
+  channels: 1
+  temp_filename: "temp_quick_note.wav"
+
+# Mattis' Exam Schedule (for topic prioritization)
+exam_schedule:
+  - course_name: "Makroökonomik (Macroeconomics)"
+    exam_date: "2026-07-15"
+    priority: "high"
+    critical_topics:
+      - "Geldpolitik (Monetary Policy)"
+      - "Inflation und Arbeitslosigkeit (Phillips-Kurve)"
+      - "IS-LM Modell"
+      - "Solow-Modell"
+
+  - course_name: "B2C E-Commerce Startups"
+    exam_date: "2026-07-22"
+    priority: "medium"
+    critical_topics:
+      - "Customer Acquisition Cost (CAC) & Customer Lifetime Value (CLV)"
+      - "Shopify App Ecosystem"
+      - "Conversion Rate Optimization (CRO)"
+
+  - course_name: "Finanzierung & Investition (Financial Modeling)"
+    exam_date: "2026-08-05"
+    priority: "high"
+    critical_topics:
+      - "Kapitalwertmethode (NPV)"
+      - "WACC (Weighted Average Cost of Capital)"
+      - "Leveraged Buyouts (LBO) basics"
