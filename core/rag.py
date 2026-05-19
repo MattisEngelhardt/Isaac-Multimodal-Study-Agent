@@ -25,8 +25,8 @@ class StudyAgentRAG:
                 return yaml.safe_load(f) or {}
         return {}
 
-    def search_context(self, db: Session, query: str, course_name: str = None, limit: int = 3) -> str:
-        """Finds matching summaries in the SQLite database based on keyword matching."""
+    def search_context(self, db: Session, query: str, course_name: str = None, limit: int = 4) -> str:
+        """Finds matching summaries in the SQLite database using semantic expansion."""
         db_query = db.query(Summary)
         
         if course_name:
@@ -34,27 +34,69 @@ class StudyAgentRAG:
             if course:
                 db_query = db_query.filter(Summary.course_id == course.id)
 
-        # Retrieve all candidate summaries to perform keyword ranking
         summaries = db_query.all()
         if not summaries:
             return ""
 
-        # Simple term match ranking
-        query_words = set(query.lower().split())
-        ranked_summaries = []
+        # Step 1: Run semantic query expansion using LLM
+        system_expander = (
+            "You are a semantic query expander. Convert the user query into a JSON list "
+            "of 3-4 related academic topics, keywords, or core theories that are relevant to "
+            "answering the query. Output ONLY a valid JSON array of strings, e.g. [\"topic1\", \"topic2\"]."
+        )
         
+        expanded_keywords = [query]
+        try:
+            expanded_json = ""
+            if self.llm_provider == "gemini" and self.gemini_key:
+                import google.generativeai as genai
+                genai.configure(api_key=self.gemini_key)
+                model_name = self.config.get("models", {}).get("gemini", "gemini-1.5-pro")
+                model = genai.GenerativeModel(model_name, system_instruction=system_expander)
+                resp = model.generate_content(query)
+                expanded_json = resp.text
+            elif self.llm_provider == "claude" and self.anthropic_key:
+                import anthropic
+                client = anthropic.Anthropic(api_key=self.anthropic_key)
+                model_name = self.config.get("models", {}).get("claude", "claude-3-5-sonnet-20241022")
+                resp = client.messages.create(
+                    model=model_name,
+                    max_tokens=256,
+                    system=system_expander,
+                    messages=[{"role": "user", "content": query}]
+                )
+                expanded_json = resp.content[0].text
+                
+            cleaned_json = expanded_json.strip()
+            if cleaned_json.startswith("```"):
+                lines = cleaned_json.split("\n")
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                cleaned_json = "\n".join(lines).strip()
+            
+            import json
+            parsed = json.loads(cleaned_json)
+            if isinstance(parsed, list):
+                expanded_keywords.extend([str(item) for item in parsed])
+        except Exception as e:
+            print(f"RAG: Semantic query expansion failed (falling back to raw query): {e}")
+
+        # Step 2: Rank summaries based on match with ALL expanded keywords
+        ranked_summaries = []
         for s in summaries:
             score = 0
-            # Higher weight for topic match
             topic_lower = s.topic.lower()
             content_lower = s.markdown_content.lower()
             
-            for word in query_words:
-                if word in topic_lower:
-                    score += 10
-                if word in content_lower:
-                    score += content_lower.count(word)
-            
+            for keyword in expanded_keywords:
+                kw_lower = keyword.lower()
+                if kw_lower in topic_lower:
+                    score += 15
+                if kw_lower in content_lower:
+                    score += content_lower.count(kw_lower)
+                    
             if score > 0:
                 ranked_summaries.append((score, s))
 
@@ -63,30 +105,31 @@ class StudyAgentRAG:
         top_matches = ranked_summaries[:limit]
 
         if not top_matches:
-            # Fallback to the latest summaries if no keyword match
+            # Fallback to the latest summaries
             top_matches = [(0, s) for s in summaries[-limit:]]
 
         context_blocks = []
         for score, s in top_matches:
-            course_lbl = s.course.name if s.course else "Unknown Course"
+            course_lbl = s.course.name if s.course else "General"
             context_blocks.append(
-                f"### Course: {course_lbl} | Topic: {s.topic}\n\n{s.markdown_content}"
+                f"### [Course: {course_lbl}] | Topic: {s.topic}\n\n{s.markdown_content}"
             )
             
         return "\n\n---\n\n".join(context_blocks)
 
     def answer_query(self, db: Session, query: str, course_name: str = None) -> dict:
-        """Runs the RAG flow: retrieves context and prompts the LLM to answer the question."""
+        """Runs RAG pipeline with cross-document context synthesis."""
         context = self.search_context(db, query, course_name=course_name)
         
         if not context:
             context = "No relevant study materials found in the local database."
 
         system_prompt = (
-            "You are Study Agent, a personal learning assistant. Answer the user's question "
-            "accurately based ONLY on the provided context from their study notes. If the context "
-            "doesn't contain the answer, use your general knowledge but state clearly that the "
-            "information was not found in their study vault."
+            "You are Study Agent, an advanced learning assistant. Answer the user's question "
+            "accurately based on the retrieved context from their study notes. You must synthesize "
+            "and link ideas across different documents and courses if they appear in the context. "
+            "If the context doesn't contain the answer, use your general knowledge but state clearly "
+            "that the information was not found in their study notes."
         )
 
         user_prompt = (
@@ -94,10 +137,9 @@ class StudyAgentRAG:
             f"{context}\n\n"
             f"User Question: {query}\n\n"
             f"Please formulate a clear, precise, and structured response in markdown. "
-            f"If applicable, cite the topic and course names where you found the information."
+            f"Cite the matching courses and topics when synthesizing relationships."
         )
 
-        # Use StudySynthesizer's LLM execution layer to make the call
         response_text = ""
         try:
             if self.llm_provider == "gemini":
