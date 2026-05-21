@@ -1,122 +1,254 @@
-# 🧠 StudyMind
+# StudyMind
 
-[![LLM-Support](https://img.shields.io/badge/LLM-Gemini%201.5%20Pro%20%7C%20Claude%203.5%20Sonnet-blue.svg)](#-dual-llm-backend-configuration)
-[![Speech-to-Text](https://img.shields.io/badge/Speech%20to%20Text-Local%20Whisper%20%7C%20OpenAI%20API-green.svg)](#-offline-local-whisper-mode)
-[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](#)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](#)
+Standalone Windows desktop app that watches a folder for incoming study materials — PDFs, handwritten notes, screenshots, voice memos — and automatically generates structured study outputs: Anki flashcards, concept summaries, and mock exam questions. Includes a background advisor that finds cross-course connections and a RAG chat for semantic queries across all stored content.
 
-StudyMind is an intelligent multi-modal desktop agent designed to automate the collection, transcription, and synthesis of academic lectures, handwritten notes, and voice recordings. By watching a target folder on your filesystem, it automatically processes, tags, and organizes incoming learning resources into structured study summaries, mock exams, and Anki-importable flashcards.
+## Problem
 
----
+Processing lecture materials into study-ready formats (flashcards, summaries, exam prep) is manual and repetitive. Each course, each week: read slides, write cards, connect concepts. StudyMind automates the full pipeline from dropping a file to having exportable study materials.
 
-## 🏗️ Multi-Agent Architecture
+## Processing Pipeline
 
-```mermaid
-graph TD
-    Watcher[Folder Watcher] -->|New File| Router{Router}
-    Router -->|Image| HandwritingAgent[Handwriting OCR Agent]
-    Router -->|Image containing 'diagram'| DiagramAgent[Diagram Visual Agent]
-    Router -->|PDF| PDFAgent[PDF Agent fitz]
-    Router -->|Word Doc| WordAgent[Word Agent docx]
-    Router -->|Audio| VoiceAgent[Voice Transcriber Whisper]
-
-    PDFAgent -->|Scanned Page Fallback| HandwritingAgent
-
-    HandwritingAgent & DiagramAgent & PDFAgent & WordAgent & VoiceAgent -->|Extracted Text| ExamPlanner[Exam Schedule Matcher]
-    ExamPlanner -->|Matched Course Topic| Synthesizer[Gemini / Claude Synthesizer]
-    Synthesizer -->|Structured JSON| Exporter[Exporter]
-
-    Exporter -->|Write CSV| AnkiDir[(Anki Flashcards)]
-    Exporter -->|Write Markdown| SummaryDir[(Markdown Summaries)]
-    Exporter -->|Write Prep Sheet| ExamDir[(Mock Exam Prep Sheets)]
+```
+File dropped into watch_folder/
+  -> Detect file type
+  -> Route to extraction agent (OCR, PDF parse, Whisper, etc.)
+  -> Extract clean text/markdown
+  -> Match to configured course via exam planner
+  -> LLM synthesizes: summary + flashcards + exam questions + memory hooks
+  -> Export: Anki CSV, Markdown summaries, exam prep sheets
+  -> Store extracted text in SQLite for RAG queries
 ```
 
-### 1. Watchdog File Observer
-Monitors a folder (`watch_dir` in `config.yaml`). To prevent locking and read errors on large documents or voice memos, the watcher spawns background threads that wait until the file size is fully stabilized and unlocked by the OS before starting the routing pipeline.
+## Pipeline Stages
 
-### 2. Parallel Routing Agents
-Files are routed to specialized extraction agents based on extension type:
-*   **Handwriting Agent**: Extracts clean Markdown structures from handwritten notebook snapshots.
-*   **Diagram Agent**: Interprets visual mechanics, graphs, and mind-maps, writing textual processes.
-*   **PDF Agent**: Parses text via PyMuPDF. If a page is scanned (no text layer), it renders the page image in-memory and invokes the LLM Vision OCR.
-*   **Word Agent**: Extracts Word text and tabular data grids.
-*   **Voice Agent**: Transcribes voice recordings using OpenAI Whisper (Cloud) or offline faster-whisper (Local).
+### 1. Folder Watcher
 
-### 3. Exam Schedule Planner & LLM Synthesizer
-*   **Planner**: Compares the file contents against your upcoming courses and priority topics listed in `config.yaml` to categorize the file correctly.
-*   **Synthesizer**: Prompts the LLM (Gemini 1.5 Pro or Claude 3.5 Sonnet) to compile high-yield study materials (Markdown concept summaries, Anki-ready flashcards, mock exam questions, and memory hooks/*Eselsbrücken*).
-*   **Exporter**: Saves structured cards into `output/anki/` (standard CSV format), summaries into `output/summaries/`, and test sheets into `output/exam_prep/`.
+`watchdog` observer monitors `watch_folder/`. On new file event:
 
----
+1. Wait until file size stabilizes (prevents processing during copy/download).
+2. Determine file type by extension.
+3. Dispatch to appropriate processor.
 
-## ⚙️ Configuration & Features
+### 2. Routing and Extraction
 
-### 🔌 Dual LLM Backend Configuration
-You can configure which LLM provider to use in [config.yaml](./config.yaml):
+| File Type | Processor | Method |
+|---|---|---|
+| `.png`, `.jpg`, `.jpeg` | Handwriting Agent | LLM Vision API — extracts text from handwritten notes |
+| `.png`, `.jpg` (diagrams) | Diagram Agent | LLM Vision API — interprets charts, graphs, mind-maps |
+| `.pdf` | PDF Agent | PyMuPDF text extraction; scanned pages (no text layer) fall back to LLM Vision OCR |
+| `.docx` | Word Agent | python-docx — text, tables, embedded content |
+| `.mp3`, `.wav`, `.m4a` | Voice Agent | faster-whisper (local) or OpenAI Whisper API |
+
+Each processor returns:
+
+```python
+class ProcessedContent(BaseModel):
+    source_file: str
+    content_type: Literal["handwriting", "diagram", "pdf", "word", "voice"]
+    extracted_text: str
+    metadata: dict              # page count, duration, dimensions, etc.
+    timestamp: datetime
+```
+
+### 3. Course Matching
+
+Exam planner compares extracted text against courses configured in `config.yaml`:
+
+- Course name keywords
+- Topic keywords per course
+- Fuzzy string matching for flexibility
+
+```python
+class CourseMatch(BaseModel):
+    course_name: str
+    confidence: float           # 0.0 - 1.0
+    matched_topics: list[str]
+```
+
+### 4. LLM Synthesis
+
+For each matched course, the LLM generates:
+
+```python
+class StudyOutput(BaseModel):
+    summary: str                        # Markdown concept summary
+    flashcards: list[Flashcard]
+    exam_questions: list[ExamQuestion]
+    memory_hooks: list[str]             # Eselsbruecken / mnemonics
+
+class Flashcard(BaseModel):
+    question: str
+    answer: str
+    tags: list[str]                     # course, topic, difficulty
+
+class ExamQuestion(BaseModel):
+    question: str
+    expected_answer: str
+    difficulty: Literal["basic", "intermediate", "advanced"]
+```
+
+### 5. Export
+
+| Output | Format | Location |
+|---|---|---|
+| Flashcards | CSV (standard Anki import: question, answer, tags) | `output/anki/` |
+| Summaries | Markdown | `output/summaries/` |
+| Exam prep | Markdown | `output/exam_prep/` |
+
+### 6. SQLite Storage
+
+All content stored in `study_vault.db` for retrieval:
+
+```sql
+CREATE TABLE documents (
+    id INTEGER PRIMARY KEY,
+    source_file TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    course TEXT,
+    extracted_text TEXT NOT NULL,
+    embedding_keywords TEXT,         -- comma-separated search terms
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE study_outputs (
+    id INTEGER PRIMARY KEY,
+    document_id INTEGER REFERENCES documents(id),
+    output_type TEXT NOT NULL,       -- 'summary', 'flashcard', 'exam_question'
+    content TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE suggestions (
+    id INTEGER PRIMARY KEY,
+    source_doc_ids TEXT NOT NULL,    -- comma-separated document IDs
+    connection TEXT NOT NULL,
+    study_tip TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## Proactive Advisor
+
+Background thread, runs every N minutes (configurable):
+
+1. Scans `documents` table for content across different courses.
+2. LLM identifies conceptual connections (e.g., a statistics concept from one course that maps to a case study in another).
+3. Generates actionable suggestion with explanation.
+4. Delivers via Windows toast notification.
+5. Stores in `suggestions` table for dashboard display.
+
+```python
+class Suggestion(BaseModel):
+    source_docs: list[int]          # document IDs
+    connection: str                 # what links them
+    study_tip: str                  # actionable recommendation
+    created_at: datetime
+```
+
+## RAG Chat
+
+Query flow via dashboard or API:
+
+1. User submits a question.
+2. Query planner generates 3-4 semantic search keywords from the question.
+3. Keywords search against `documents.extracted_text` and `documents.embedding_keywords`.
+4. Top-K relevant chunks retrieved.
+5. Cross-document synthesizer: chunks + original question -> LLM -> coherent markdown answer.
+
+## UI
+
+- **System tray:** Green brain icon. Menu: Open watch folder, Dashboard, Settings, Quit.
+- **Global hotkeys:**
+  - `Ctrl+Shift+X` — Screenshot primary display (for OneNote / slide capture).
+  - `Ctrl+Shift+R` — Toggle quick voice memo recording.
+- **Screen overlay:** Processing status bar (Detecting / Extracting / Matching / Synthesizing / Done).
+- **Toast notifications:** Completion alerts + proactive advisor suggestions.
+
+## Config (`config.yaml`)
 
 ```yaml
-models:
-  llm_provider: "gemini"             # "gemini" (Free flagship) or "claude" (Paid)
-  claude: "claude-3-5-sonnet-20241022"
-  gemini: "gemini-1.5-pro"           # Flagschip-reasoning model
+llm:
+  provider: "gemini"                    # "gemini" or "claude"
+  gemini_model: "gemini-2.5-flash"
+  claude_model: "claude-sonnet-4-6-20250514"
+
+whisper:
+  mode: "local"
+  local_model: "base"
+
+paths:
+  watch_folder: "./watch_folder"
+  output_dir: "./output"
+
+courses:
+  - name: "BWL Grundlagen"
+    exam_date: "2026-07-15"
+    topics: ["Bilanzierung", "Kostenrechnung", "Marketing"]
+  - name: "Statistik"
+    exam_date: "2026-07-20"
+    topics: ["Regression", "Hypothesentest", "Wahrscheinlichkeit"]
+
+proactive:
+  interval_minutes: 30
+  enabled: true
+
+database:
+  path: "./study_vault.db"
 ```
 
-*   **Google Gemini 1.5 Pro**: Offers zero-cost API requests under Google AI Studio's free tier. Features native structured JSON schema enforcement.
-*   **Anthropic Claude 3.5 Sonnet**: Industry-standard code generation and reasoning (requires a paid key).
+## Dependencies
 
-### 🎙️ Offline Local Whisper Mode
-To transcribe voice memos 100% free offline, toggle local mode in [config.yaml](./config.yaml):
-
-```yaml
-models:
-  whisper_mode: "local"              # "local" for offline free transcription, "api" for OpenAI API
-  whisper_local_model: "base"         # "tiny", "base", "small", "medium"
+```
+watchdog
+faster-whisper
+sounddevice
+soundfile
+pydantic>=2.0
+google-genai
+anthropic
+PyMuPDF
+python-docx
+pystray
+Pillow
+keyboard
+PyYAML
 ```
 
----
+## Module Structure
 
-## 🚀 Getting Started
-
-### 1. Installation
-Clone the repository, configure a virtual environment, and install dependencies:
-```bash
-python -m venv venv
-source venv/Scripts/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
 ```
-
-### 2. API Keys Configuration
-Create a `.env` file in the `studymind` directory. The application is configured with **intelligent startup checks**, so it only requires the keys that are active in your `config.yaml`:
-
-```env
-# Required if llm_provider is "gemini"
-GEMINI_API_KEY=your_google_gemini_key
-
-# Required if llm_provider is "claude"
-ANTHROPIC_API_KEY=your_anthropic_api_key
-
-# Required only if whisper_mode is "api"
-OPENAI_API_KEY=your_openai_api_key
-```
-
-### 3. Configure Your Course Schedule
-Open [config.yaml](./config.yaml) and customize your academic course names, exam dates, and priority topic keywords. This ensures that any uploaded resource is matched to the correct course.
-
-### 4. Running the Application
-```bash
-python main.py
-```
-*   A system tray icon with a **green brain** will appear in the taskbar.
-*   Drop any study file (PDF, slide screenshot, handwritten note image) into the watched folder (default: `./watch_folder`).
-*   **Global Hotkeys**:
-    *   Press **`Ctrl+Shift+X`** to take a screenshot of your primary display (ideal for OneNote capturing!).
-    *   Press **`Ctrl+Shift+R`** to toggle quick mic recording.
-*   Watch the desktop overlay track progress and notify you when your flashcards and summaries are ready!
-
----
-
-## 🧪 Automated Tests
-Run the test suite using pytest to verify code logic and mocks:
-```bash
-python -m pytest tests/
+study_agent/
+  main.py                       # Entry: tray icon, watcher start, hotkey registration
+  config.yaml
+  core/
+    watcher.py                  # watchdog folder observer
+    router.py                   # file type -> processor dispatch
+    processors/
+      handwriting.py            # LLM Vision OCR for handwritten notes
+      diagram.py                # LLM Vision for charts and graphs
+      pdf_processor.py          # PyMuPDF + vision fallback
+      word_processor.py         # python-docx extraction
+      voice.py                  # Whisper transcription
+    exam_planner.py             # course matching logic
+    synthesizer.py              # LLM study material generation
+    exporter.py                 # Anki CSV, Markdown, exam sheet writers
+    db.py                       # SQLite operations
+    rag.py                      # query planner + retrieval + synthesis
+    proactive.py                # background advisor thread
+  models/
+    content.py                  # ProcessedContent, CourseMatch
+    study_material.py           # StudyOutput, Flashcard, ExamQuestion, Suggestion
+  capture/
+    screenshot.py               # Ctrl+Shift+X screen capture
+    quick_record.py             # Ctrl+Shift+R voice memo
+  ui/
+    tray.py                     # System tray icon + menu
+    overlay.py                  # Processing status overlay
+    notification.py             # Desktop toasts
+  tests/
+    test_processors.py
+    test_synthesizer.py
+    test_exporter.py
+    test_rag.py
+    test_proactive.py
 ```
