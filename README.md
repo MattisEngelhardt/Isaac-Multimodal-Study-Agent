@@ -1,4 +1,4 @@
-# StudyMind
+# ISAAC
 
 Standalone Windows desktop app that watches a folder for incoming study materials — PDFs, handwritten notes, screenshots, voice memos — and automatically generates structured study outputs: Anki flashcards, concept summaries, and mock exam questions. Includes a background advisor that finds cross-course connections and a RAG chat for semantic queries across all stored content.
 
